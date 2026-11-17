@@ -21,14 +21,20 @@ little toward the persistence forecast (ratio 1 with the baseline's random-walk 
 with strength alpha = n_eff / (n_eff + K) from the hour's effective sample size, so a thin
 or lopsided hour degrades gracefully instead of extrapolating noise.
 
-What the leave-one-out backtest over the 38 practice comparables changed in v2 (and why):
-the v1 shrinkage (K = 6) pulled late hours hard toward ratio 1, but real launch curves keep
+What the leave-one-out backtest over the 38 practice comparables changed (and why):
+v1's shrinkage (K = 6) pulled late hours hard toward ratio 1, but real launch curves keep
 growing into the evening unlock waves -- v1's median sat below the actual by +0.21..+0.35
-log units over hours 18-24, and cutting K to 1.5 was worth ~0.10 of mean pinball loss in
-LOO (0.544 -> 0.446) with the big-launch subset unchanged. The resemblance factors were
-likewise softened (console 1.5 -> 1.25, midnight 1.25 -> 1.1, early-access 0.5 -> 0.75)
-and the scale bandwidth narrowed (1.5 -> 1.25): at v1 strength the hand-set multipliers,
-not the data, were deciding which curves counted.
+log units over hours 18-24. v2 cut K to 1.5, softened the resemblance factors (console
+1.5 -> 1.25, midnight 1.25 -> 1.1, early-access 0.5 -> 0.75) and narrowed the scale
+bandwidth (1.5 -> 1.25): LOO 0.544 -> 0.446, big-launch subset unchanged. v3 then removed
+the shrinkage from the median altogether and weakened it for the tails (K = 1.0): the
+persistence prior's median is a flat ratio of exactly 1, the single most wrong ingredient
+late in the day, while the weighted empirical median over ~37 curves is the best-estimated
+number in the model; the tails keep a little shrinkage as insurance, because tail
+quantiles are genuinely thinner estimates. LOO 0.446 -> 0.421, big-launch subset a wash
+(0.2105 -> 0.2114). Also tested and rejected on the same backtest: widening the empirical
+spread by 1.1-1.2x (under-coverage turned out to be center misses on outlier launches,
+not a uniformly narrow spread; widening scored monotonically worse).
 
 Safety: output validity outranks forecast quality. The model path is wrapped so any
 surprise (missing fields, unusable comparables) falls back to the persistence forecast,
@@ -60,15 +66,16 @@ Z = [-1.645, -0.674, 0.0, 0.674, 1.645]
 # The persistence spread, in natural-log units per square-root hour (the house baseline's).
 SIGMA = 0.15
 
-# --- Model constants (v2, tuned by the leave-one-out backtest) ------------------------------
+# --- Model constants (v3, tuned by the leave-one-out backtest) ------------------------------
 # Gaussian kernel bandwidth, in log units, for "similar scale to this case's hour 1".
 SCALE_BANDWIDTH = 1.25
 # Weight multipliers for launches resembling this one (softened from v1; see docstring).
 CONSOLE_FACTOR = 1.25       # platforms include a console (this launch is console-only)
 MIDNIGHT_FACTOR = 1.1       # unlock rolled at midnight local time, as this one does
 EARLY_ACCESS_FACTOR = 0.75  # release day distorted by paid early access: trust it less
-# Shrinkage: alpha = n_eff / (n_eff + SHRINK_K); K pseudo-observations of persistence.
-SHRINK_K = 1.5
+# Shrinkage for the non-median quantiles: alpha = n_eff / (n_eff + SHRINK_K), K
+# pseudo-observations of persistence. The median is never shrunk (see docstring).
+SHRINK_K = 1.0
 # Output bounds: every quantile must lie in (0, 1e9]; keep a small positive floor.
 Q_FLOOR = 0.01
 Q_CAP = 1_000_000_000.0
@@ -208,7 +215,8 @@ def model_rows(case: dict, p1: float, hours: list) -> list:
             persistence_log = z * spread  # log-ratio the baseline implies at this level
             if alpha > 0.0:
                 emp_log = weighted_quantile(samples, tau)
-                log_q = alpha * emp_log + (1.0 - alpha) * persistence_log
+                a = 1.0 if tau == 0.5 else alpha  # the median stands on the data alone
+                log_q = a * emp_log + (1.0 - a) * persistence_log
             else:
                 log_q = persistence_log
             qs.append(p1 * math.exp(log_q))
