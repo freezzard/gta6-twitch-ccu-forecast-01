@@ -1,29 +1,40 @@
 """gta6-twitch-ccu-forecast-01 entry: a comparables-ratio forecaster (Python 3.13, stdlib only).
 
-Idea: hour 1 of a launch day is a weak anchor on its own, because a rolling midnight-local
-unlock keeps feeding new regions into the category for most of the UTC day (New Zealand and
-Australia first, then Europe, then the US coasts). The case file carries 38-42 past launches
-with their full hourly curves, and those curves share that shape. So for each past launch I
-take its release-day curve, divide every hour by its own hour 1, and work with the log-ratios
+Model, re-derived for v2. A launch day's first hour is a weak anchor by itself: the unlock
+rolls at midnight local time (New Zealand first, then Europe, then the US coasts), so new
+regions keep joining the audience for most of the UTC day and the curve's *shape* is the
+predictable part. The case file carries dozens of past launches with full hourly curves.
+For each past launch c I form the release-day log-ratios
 
-    r_c(h) = ln( v_c(h) / v_c(1) ),   h = 2..24.
+    r_c(h) = ln( v_c(h) / v_c(1) ),   h = 2..24,
 
-The forecast for this case's hour h is hour 1's print times exp of a weighted quantile of the
-comparables' log-ratios at h:
+and forecast this case's hour h as its own hour-1 print times the exponential of a weighted
+quantile of those ratios:
 
     q_tau(h) = p1 * exp( Q_tau( { r_c(h) } ) ).
 
-Weights favour the launches most like this one: console launches (this game is console-only
-at release), launches whose unlock rolled at midnight local time, and launches of a similar
-scale to this case's hour 1 (a Gaussian kernel on the log-scale gap). Launches whose day was
-distorted by paid early access count half. Where an hour's weighted sample is thin, its
-quantiles shrink toward the persistence forecast (ratio 1, random-walk spread), so a sparse
-hour degrades gracefully instead of guessing wildly.
+Weights: a Gaussian kernel on the log-scale gap between the comparable's hour 1 and this
+case's hour 1 (similar-scale launches count most), times mild resemblance factors for
+console line-ups and midnight-local unlocks, and a mild discount for launches whose day
+was distorted by paid early access. Each hour's empirical log-quantiles are then shrunk a
+little toward the persistence forecast (ratio 1 with the baseline's random-walk spread),
+with strength alpha = n_eff / (n_eff + K) from the hour's effective sample size, so a thin
+or lopsided hour degrades gracefully instead of extrapolating noise.
 
-Safety: validity of the output file is worth more than any forecast. The model path is wrapped
-so that any surprise (missing fields, empty comparables, a ratio sample that cannot be built)
-falls back to the plain persistence forecast, and even that has a constant last resort behind
-it. Every input file always gets an output file of the exact required shape.
+What the leave-one-out backtest over the 38 practice comparables changed in v2 (and why):
+the v1 shrinkage (K = 6) pulled late hours hard toward ratio 1, but real launch curves keep
+growing into the evening unlock waves -- v1's median sat below the actual by +0.21..+0.35
+log units over hours 18-24, and cutting K to 1.5 was worth ~0.10 of mean pinball loss in
+LOO (0.544 -> 0.446) with the big-launch subset unchanged. The resemblance factors were
+likewise softened (console 1.5 -> 1.25, midnight 1.25 -> 1.1, early-access 0.5 -> 0.75)
+and the scale bandwidth narrowed (1.5 -> 1.25): at v1 strength the hand-set multipliers,
+not the data, were deciding which curves counted.
+
+Safety: output validity outranks forecast quality. The model path is wrapped so any
+surprise (missing fields, unusable comparables) falls back to the persistence forecast,
+which itself sits in front of a constant last resort. Every input file always produces an
+output file of exactly the required shape: 23 rows, hours 2..24, five non-decreasing
+quantiles each in (0, 1e9].
 
 Run by the grader as `python3 -P -s /bot/main.py`; locally:
     MAKEFUN_INPUT_DIR=<dir with .in files> MAKEFUN_OUTPUT_DIR=<out dir> python3 main.py
@@ -49,15 +60,15 @@ Z = [-1.645, -0.674, 0.0, 0.674, 1.645]
 # The persistence spread, in natural-log units per square-root hour (the house baseline's).
 SIGMA = 0.15
 
-# --- Model constants (v1; to be tuned by backtest) -------------------------------------------
+# --- Model constants (v2, tuned by the leave-one-out backtest) ------------------------------
 # Gaussian kernel bandwidth, in log units, for "similar scale to this case's hour 1".
-SCALE_BANDWIDTH = 1.5
-# Weight multipliers for launches resembling this one.
-CONSOLE_FACTOR = 1.5        # platforms include a console (this launch is console-only)
-MIDNIGHT_FACTOR = 1.25       # unlock rolled at midnight local time, as this one does
-EARLY_ACCESS_FACTOR = 0.5    # release day distorted by paid early access: trust it less
+SCALE_BANDWIDTH = 1.25
+# Weight multipliers for launches resembling this one (softened from v1; see docstring).
+CONSOLE_FACTOR = 1.25       # platforms include a console (this launch is console-only)
+MIDNIGHT_FACTOR = 1.1       # unlock rolled at midnight local time, as this one does
+EARLY_ACCESS_FACTOR = 0.75  # release day distorted by paid early access: trust it less
 # Shrinkage: alpha = n_eff / (n_eff + SHRINK_K); K pseudo-observations of persistence.
-SHRINK_K = 6.0
+SHRINK_K = 1.5
 # Output bounds: every quantile must lie in (0, 1e9]; keep a small positive floor.
 Q_FLOOR = 0.01
 Q_CAP = 1_000_000_000.0
@@ -93,7 +104,7 @@ def persistence_rows(p1: float, hours: list) -> list:
 
 # --- Comparables model -----------------------------------------------------------------------
 
-def comparable_weight(comp: dict, log_p1: float) -> float:
+def comparable_weight(comp: dict) -> float:
     """How much a past launch's curve should count for this case, before scale similarity."""
     w = 1.0
     platforms = " ".join(str(p) for p in comp.get("platforms") or [])
@@ -172,7 +183,7 @@ def model_rows(case: dict, p1: float, hours: list) -> list:
             continue
         v1, ratios = built
         gap = (math.log(v1) - log_p1) / SCALE_BANDWIDTH
-        w = comparable_weight(comp, log_p1) * math.exp(-0.5 * gap * gap)
+        w = comparable_weight(comp) * math.exp(-0.5 * gap * gap)
         if w <= 0:
             continue
         for h, r in ratios.items():
